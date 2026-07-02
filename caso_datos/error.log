@@ -1,0 +1,4 @@
+2026-06-11T14:03:22.481Z INFO  [event-sport-orc] PUT /v1/users/U-1002/document requestId=8f2a1c9b
+2026-06-11T14:03:22.612Z DEBUG [event-sport-orc] running step ValidateDocumentNumberUniquenessStep for document_type=CC document_number=1052000123
+2026-06-11T14:03:22.640Z WARN  [event-sport-orc] uniqueness check failed: document (CC, 1052000123) already registered by another user
+2026-06-11T14:03:22.641Z ERROR [event-sport-orc] request 8f2a1c9b failed: DOCUMENT_NUMBER_ALREADY_REGISTERED (409) — cannot update document for user U-1002
