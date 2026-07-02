@@ -6,16 +6,20 @@ El error **no es un bug** del sistema de unicidad: el constraint `UNIQUE (docume
 
 La causa raíz es un **registro duplicado de la misma persona** en la tabla `users`:
 
-| Código   | Documento      | Nombre        | Creado     | Rol en el incidente |
-|----------|----------------|---------------|------------|---------------------|
-| `U-1001` | CC 1052000123  | Mariana Gomez | 2021-03-10 | Usuario histórico con el documento **correcto** |
-| `U-1002` | CC 10520001230 | Mariana Gomez | 2026-05-28 | Registro nuevo del profe con un **typo** (cero extra al final) |
+| Código   | Documento      | Nombre        | Email                        | Creado     | Rol en el incidente |
+|----------|----------------|---------------|------------------------------|------------|---------------------|
+| `U-1001` | CC 1052000123  | Mariana Gomez | mariana.gomez@correo.com     | 2021-03-10 | Usuario histórico con el documento **correcto** |
+| `U-1002` | CC 10520001230 | Mariana Gomez | mariana.gomez.dep@correo.com | 2026-05-28 | Registro nuevo del profe con un **typo** (cero extra al final) |
+
+**Pista del typo:** el documento incorrecto (`10520001230`) es el correcto (`1052000123`) con un **cero adicional al final**. Los correos también son consistentes con la misma persona (`mariana.gomez@` vs `mariana.gomez.dep@`).
 
 El profesor intentó corregir el documento de `U-1002` a `CC 1052000123`, pero ese documento **ya pertenece a `U-1001`**. Por eso el servicio responde `DOCUMENT_NUMBER_ALREADY_REGISTERED (409)`.
 
 Además, la inscripción al evento (`P-5001` en `EVT-JIN-2026`) quedó asociada a `U-1002` (el usuario con el documento incorrecto), no a `U-1001` (el usuario con el documento correcto).
 
 El profesor tiene razón desde su perspectiva ("solo la registré una vez"): él creó `U-1002` en 2026, pero desconoce el registro histórico `U-1001` de 2021.
+
+> **Nota de arquitectura:** en esta prueba las tablas están en el mismo esquema y el `JOIN` funciona. En producción son microservicios distintos sin FK garantizada; la corrección podría requerir coordinar identidad (`users`) e inscripciones (`participants`) entre equipos.
 
 ---
 
@@ -29,7 +33,12 @@ FROM users
 WHERE code = 'U-1002';
 ```
 
-**Resultado esperado:** `U-1002` con documento `CC 10520001230` (typo).
+**Resultado obtenido:**
+
+```
+code    document_type  document_number  full_name      email                         created_at
+U-1002  CC             10520001230      Mariana Gomez  mariana.gomez.dep@correo.com  2026-05-28T14:22:00Z
+```
 
 ### 2. ¿Quién ya tiene el documento correcto?
 
@@ -40,7 +49,12 @@ WHERE document_type = 'CC'
   AND document_number = '1052000123';
 ```
 
-**Resultado esperado:** `U-1001` con el documento que el profe intenta asignar.
+**Resultado obtenido:**
+
+```
+code    document_type  document_number  full_name      email                     created_at
+U-1001  CC             1052000123       Mariana Gomez  mariana.gomez@correo.com  2021-03-10T09:00:00Z
+```
 
 ### 3. ¿Hay más registros de Mariana Gomez?
 
@@ -50,7 +64,7 @@ FROM users
 WHERE full_name LIKE '%Mariana%';
 ```
 
-**Resultado esperado:** dos filas — `U-1001` y `U-1002`.
+**Resultado obtenido:** dos filas — `U-1001` y `U-1002` (mismo nombre, documentos distintos, emails relacionados).
 
 ### 4. ¿A qué usuario está ligada la inscripción?
 
@@ -62,7 +76,14 @@ JOIN users u ON p.user_code = u.code
 WHERE u.full_name LIKE '%Mariana%';
 ```
 
-**Resultado esperado:** `P-5001` apunta a `U-1002` (documento con typo), no a `U-1001`.
+**Resultado obtenido:**
+
+```
+code    user_code  event_code    status    created_at            full_name      document_number
+P-5001  U-1002     EVT-JIN-2026  ENROLLED  2026-05-28T14:25:00Z  Mariana Gomez  10520001230
+```
+
+La inscripción apunta a `U-1002` (typo), no a `U-1001` (documento correcto).
 
 ### 5. ¿`U-1002` tiene otras referencias?
 
@@ -72,7 +93,27 @@ FROM participants
 WHERE user_code = 'U-1002';
 ```
 
-**Resultado esperado:** solo `P-5001`. Necesario confirmar en producción que no hay referencias en otros microservicios.
+**Resultado obtenido:** solo `P-5001`. En producción, confirmar que no hay referencias en otros microservicios.
+
+### 6. ¿Hay documentos parecidos? (búsqueda por patrón)
+
+```sql
+SELECT code, document_number, full_name, email, created_at
+FROM users
+WHERE document_type = 'CC'
+  AND document_number LIKE '105200012%';
+```
+
+**Resultado obtenido:**
+
+```
+code    document_number  full_name      email                         created_at
+U-1001  1052000123       Mariana Gomez  mariana.gomez@correo.com      2021-03-10T09:00:00Z
+U-1002  10520001230      Mariana Gomez  mariana.gomez.dep@correo.com  2026-05-28T14:22:00Z
+U-1003  1052000124       Andres Torres  a.torres@correo.com           2024-01-15T08:30:00Z
+```
+
+Los dos primeros registros confirman el typo; el tercero (`U-1003`) es otra persona y no interviene en el incidente.
 
 ---
 
@@ -80,7 +121,7 @@ WHERE user_code = 'U-1002';
 
 **Enfoque:** reasignar la inscripción al usuario canónico (`U-1001`, que ya tiene el documento correcto) y eliminar el duplicado (`U-1002`).
 
-> Ejecutar dentro de una transacción. En producción, hacer backup o snapshot antes.
+> Ejecutar dentro de una transacción. En producción, hacer backup o snapshot antes. En sistemas reales, valorar desactivar el usuario duplicado en lugar de `DELETE` directo, según política del equipo de identidad.
 
 ```sql
 BEGIN;
@@ -126,11 +167,19 @@ HAVING COUNT(*) > 1;
 
 ---
 
+## Comunicación al cliente
+
+Mensaje que enviaría al profesor / Servicio al Cliente tras aplicar la corrección:
+
+> Hola, ya revisamos el caso de Mariana Gómez. El documento correcto (CC 1052000123) ya existía en un registro previo de la deportista; el registro nuevo tenía un dígito de más. Consolidamos la inscripción al evento bajo el usuario correcto. Ya puede continuar sin el error de documento duplicado.
+
+---
+
 ## Verificaciones previas a producción
 
 Antes de ejecutar en producción, verificaría:
 
-1. **Identidad:** confirmar con el profe o Servicio al Cliente que `U-1001` y `U-1002` son la misma persona (mismo nombre, contexto del evento, posible registro previo en 2021).
+1. **Identidad:** confirmar con el profe o Servicio al Cliente que `U-1001` y `U-1002` son la misma persona (mismo nombre, emails relacionados, contexto del evento, posible registro previo en 2021).
 2. **Referencias cruzadas:** en otros microservicios (pagos, historial deportivo, etc.) buscar referencias a `U-1002` que no estén en `participants`.
 3. **Historial de `U-1001`:** revisar si tiene inscripciones activas en otros eventos que pudieran verse afectadas.
 4. **Backup:** snapshot o export de las filas afectadas (`users` U-1001/U-1002, `participants` P-5001) antes del cambio.
