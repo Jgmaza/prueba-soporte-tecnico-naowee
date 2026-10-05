@@ -66,13 +66,8 @@ func EvaluateSportSwap(a Athlete, targetSport string, groups []Group) ([]Group, 
 	return eligible, nil
 }
 
-// resolveCategory determina la categoría del deportista.
+// resolveCategory determina la categoría del deportista según su año de nacimiento.
 func resolveCategory(a Athlete) string {
-	// Si el deportista ya viene inscrito con una categoría, la reutilizamos;
-	// si no, la calculamos a partir de su edad.
-	if a.CategoryCode != "" {
-		return a.CategoryCode
-	}
 	cat, ok := DiscoverCategory(a.BirthYear)
 	if !ok {
 		return ""
